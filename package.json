@@ -4,9 +4,8 @@
   "description": "Babypips Risk On Risk Off API",
   "main": "server.js",
   "scripts": {
-  "start": "node server.js",
-  "postinstall": "npx playwright install chromium"
-}
+    "start": "node server.js",
+    "postinstall": "playwright install chromium"
   },
   "author": "",
   "license": "ISC",
