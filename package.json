@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "playwright install chromium"
+    "postinstall": "node node_modules/playwright/cli.js install chromium"
   },
   "author": "",
   "license": "ISC",
