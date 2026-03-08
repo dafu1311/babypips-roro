@@ -1,15 +1,20 @@
 const express = require("express");
-const { chromium } = require("playwright-core");
+const { chromium } = require("playwright");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 const URL = "https://www.babypips.com/tools/risk-on-risk-off-meter";
+
+app.get("/", (req, res) => {
+  res.send("Babypips RORO API läuft. Nutze /roro");
+});
 
 async function getRiskData() {
   const browser = await chromium.launch({
-  headless: true,
-  args: ["--no-sandbox", "--disable-setuid-sandbox"]
-});
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
+  });
+
   const page = await browser.newPage();
 
   try {
@@ -32,8 +37,8 @@ async function getRiskData() {
 
     return {
       ok: true,
-      value: value,
-      regime: regime,
+      value,
+      regime,
       updatedAt: new Date().toISOString()
     };
   } finally {
