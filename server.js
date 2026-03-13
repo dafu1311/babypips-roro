@@ -4,14 +4,20 @@ const { chromium } = require("playwright");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-const RORO_URL = "https://www.babypips.com/tools/risk-on-risk-off-meter";
-const FF_URL = "https://www.forexfactory.com/calendar";
+const RORO_URL =
+  "https://www.babypips.com/tools/risk-on-risk-off-meter";
+
+const CALENDAR_URL =
+  "https://www.babypips.com/economic-calendar";
+
+// -------------------- ROOT --------------------
 
 app.get("/", (req, res) => {
-  res.send("API laeuft. Nutze /roro oder /usd-news");
+  res.send("API läuft. Nutze /roro oder /usd-news");
 });
 
-// -------------------- RORO --------------------
+// -------------------- RISK DATA --------------------
+
 async function getRiskData() {
   const browser = await chromium.launch({
     headless: true,
@@ -29,7 +35,10 @@ async function getRiskData() {
     await page.waitForTimeout(8000);
 
     const body = await page.locator("body").innerText();
-    const match = body.match(/\b(\d{1,3})\s+(Risk-Off|Risk-On|Neutral)/);
+
+    const match = body.match(
+      /\b(\d{1,3})\s+(Risk-Off|Risk-On|Neutral)/
+    );
 
     if (!match) {
       throw new Error("RORO Score nicht gefunden");
@@ -37,7 +46,7 @@ async function getRiskData() {
 
     return {
       ok: true,
-      value: parseInt(match[1], 10),
+      value: parseInt(match[1]),
       regime: match[2],
       updatedAt: new Date().toISOString()
     };
@@ -58,61 +67,29 @@ app.get("/roro", async (req, res) => {
   }
 });
 
-// -------------------- FOREXFACTORY USD RED NEWS --------------------
-// "Rote" USD-Events über Namensmuster
-function isHighImpactUsdEvent(eventName) {
-  const e = eventName.toLowerCase();
-
-  const highImpactKeywords = [
-    "core pce",
-    "pce price",
-    "core cpi",
-    "cpi ",
-    "cpi y/y",
-    "cpi m/m",
-    "ppi ",
-    "non-farm",
-    "nfp",
-    "unemployment rate",
-    "fomc",
-    "fed",
-    "interest rate",
-    "powell",
-    "gdp",
-    "retail sales",
-    "jolts",
-    "ism",
-    "durable goods",
-    "personal income",
-    "personal spending",
-    "employment change",
-    "consumer sentiment"
-  ];
-
-  return highImpactKeywords.some(k => e.includes(k));
-}
+// -------------------- USD RED NEWS --------------------
 
 function parseMinutesLeft(timeStr) {
-  if (!timeStr || timeStr === "All Day" || timeStr === "Tentative") return null;
-
   const m = timeStr.match(/(\d{1,2}):(\d{2})(am|pm)/i);
+
   if (!m) return null;
 
-  let hours = parseInt(m[1], 10);
-  const mins = parseInt(m[2], 10);
+  let hours = parseInt(m[1]);
+  const minutes = parseInt(m[2]);
   const ampm = m[3].toLowerCase();
 
   if (ampm === "pm" && hours !== 12) hours += 12;
   if (ampm === "am" && hours === 12) hours = 0;
 
   const now = new Date();
-  const eventDate = new Date();
-  eventDate.setHours(hours, mins, 0, 0);
 
-  return Math.round((eventDate.getTime() - now.getTime()) / 60000);
+  const event = new Date();
+  event.setHours(hours, minutes, 0, 0);
+
+  return Math.round((event - now) / 60000);
 }
 
-async function getUsdRedNews() {
+async function getUsdNews() {
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"]
@@ -121,89 +98,61 @@ async function getUsdRedNews() {
   const page = await browser.newPage();
 
   try {
-    await page.goto(FF_URL, {
+    await page.goto(CALENDAR_URL, {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
     await page.waitForTimeout(6000);
 
-    const text = await page.locator("body").innerText();
-    const lines = text
-      .split("\n")
-      .map(s => s.trim())
-      .filter(Boolean);
+    const rows = await page.evaluate(() => {
+      const data = [];
 
-    const events = [];
-    let currentTime = "";
+      document.querySelectorAll("tr").forEach((row) => {
+        const currency = row.innerText.includes("USD");
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+        if (!currency) return;
 
-      // Zeit merken, z.B. 1:30pm oder 3:00pm
-      if (/^\d{1,2}:\d{2}(am|pm)$/i.test(line)) {
-        currentTime = line;
-        continue;
-      }
+        const impact =
+          row.innerHTML.includes("High Impact") ||
+          row.innerHTML.includes("high");
 
-      // Suche USD-Blöcke
-      if (line === "USD") {
-        const eventName = lines[i + 1] || "";
-        const valuesLine = lines[i + 2] || "";
+        if (!impact) return;
 
-        // Werte zerlegen (Actual Forecast Previous)
-        const values = valuesLine.split(/\s+/).filter(Boolean);
+        const cols = row.innerText.split("\n").map(x => x.trim());
 
-        let actual = "-";
-        let forecast = "-";
-        let previous = "-";
+        data.push(cols);
+      });
 
-        if (values.length >= 1) actual = values[0];
-        if (values.length >= 2) forecast = values[1];
-        if (values.length >= 3) previous = values[2];
+      return data;
+    });
 
-        if (eventName && isHighImpactUsdEvent(eventName)) {
-          events.push({
-            currency: "USD",
-            time: currentTime || "-",
-            event: eventName,
-            actual,
-            forecast,
-            previous,
-            minutesLeft: parseMinutesLeft(currentTime)
-          });
-        }
-      }
-    }
-
-    if (!events.length) {
+    if (!rows.length) {
       return {
         ok: true,
-        found: false,
-        message: "Keine USD Red Folder News gefunden"
+        found: false
       };
     }
 
-    // nächstes relevantes Event zuerst
-    events.sort((a, b) => {
-      const av = a.minutesLeft === null ? 999999 : Math.abs(a.minutesLeft);
-      const bv = b.minutesLeft === null ? 999999 : Math.abs(b.minutesLeft);
-      return av - bv;
-    });
+    const event = rows[0];
 
-    const news = events[0];
+    const time = event[0] || "-";
+    const name = event[2] || "-";
+    const actual = event[3] || "-";
+    const forecast = event[4] || "-";
+    const previous = event[5] || "-";
 
     return {
       ok: true,
       found: true,
-      currency: news.currency,
+      currency: "USD",
       impact: "HIGH",
-      time: news.time,
-      event: news.event,
-      actual: news.actual,
-      forecast: news.forecast,
-      previous: news.previous,
-      minutesLeft: news.minutesLeft,
+      time,
+      event: name,
+      actual,
+      forecast,
+      previous,
+      minutesLeft: parseMinutesLeft(time),
       updatedAt: new Date().toISOString()
     };
   } finally {
@@ -213,7 +162,7 @@ async function getUsdRedNews() {
 
 app.get("/usd-news", async (req, res) => {
   try {
-    const data = await getUsdRedNews();
+    const data = await getUsdNews();
     res.json(data);
   } catch (err) {
     res.status(500).json({
@@ -224,5 +173,5 @@ app.get("/usd-news", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server laeuft auf Port ${PORT}`);
+  console.log("Server läuft auf Port", PORT);
 });
