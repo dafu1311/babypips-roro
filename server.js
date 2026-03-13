@@ -5,7 +5,7 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 const RORO_URL = "https://www.babypips.com/tools/risk-on-risk-off-meter";
-const FF_URL = "https://www.forexfactory.com/calendar";
+const FF_JSON_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
 
 app.get("/", (req, res) => {
   res.send("API laeuft. Nutze /roro oder /usd-news");
@@ -58,122 +58,137 @@ app.get("/roro", async (req, res) => {
   }
 });
 
-// -------------------- FOREX FACTORY NEWS --------------------
-function minutesUntil(timeStr) {
-  if (!timeStr || timeStr === "All Day" || timeStr === "Tentative") return null;
-
-  const now = new Date();
-  const today = new Date();
-
-  const m = timeStr.match(/(\d{1,2}):(\d{2})(am|pm)/i);
-  if (!m) return null;
-
-  let hours = parseInt(m[1], 10);
-  const mins = parseInt(m[2], 10);
-  const ampm = m[3].toLowerCase();
-
-  if (ampm === "pm" && hours !== 12) hours += 12;
-  if (ampm === "am" && hours === 12) hours = 0;
-
-  today.setHours(hours, mins, 0, 0);
-
-  const diffMs = today.getTime() - now.getTime();
-  return Math.round(diffMs / 60000);
+// -------------------- NEWS HELFER --------------------
+function pick(obj, keys, fallback = "") {
+  for (const k of keys) {
+    if (obj && obj[k] !== undefined && obj[k] !== null && String(obj[k]).trim() !== "") {
+      return String(obj[k]).trim();
+    }
+  }
+  return fallback;
 }
 
+function parseImpactValue(item) {
+  const raw = pick(item, ["impact", "impactTitle", "impact_name", "impactLabel"], "").toLowerCase();
+
+  if (raw.includes("high") || raw.includes("red")) return "HIGH";
+  if (raw.includes("medium")) return "MEDIUM";
+  if (raw.includes("low")) return "LOW";
+
+  // Manche Feeds speichern Impact numerisch
+  const numeric = Number(pick(item, ["impact_num", "impactNum", "impactValue"], ""));
+  if (!Number.isNaN(numeric)) {
+    if (numeric >= 3) return "HIGH";
+    if (numeric === 2) return "MEDIUM";
+    if (numeric === 1) return "LOW";
+  }
+
+  return "";
+}
+
+function parseMinutesLeft(item) {
+  const dateStr = pick(item, ["date", "datetime", "timestamp", "dateUtc"], "");
+  if (!dateStr) return null;
+
+  const eventDate = new Date(dateStr);
+  if (isNaN(eventDate.getTime())) return null;
+
+  return Math.round((eventDate.getTime() - Date.now()) / 60000);
+}
+
+function formatEventTime(item) {
+  const directTime = pick(item, ["time", "event_time"], "");
+  if (directTime) return directTime;
+
+  const dateStr = pick(item, ["date", "datetime", "timestamp", "dateUtc"], "");
+  if (!dateStr) return "-";
+
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return "-";
+
+  let hours = d.getHours();
+  const mins = d.getMinutes().toString().padStart(2, "0");
+  const suffix = hours >= 12 ? "pm" : "am";
+  hours = hours % 12;
+  if (hours === 0) hours = 12;
+
+  return `${hours}:${mins}${suffix}`;
+}
+
+// -------------------- USD RED NEWS --------------------
 async function getUsdRedNews() {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"]
+  const response = await fetch(FF_JSON_URL, {
+    headers: {
+      "User-Agent": "Mozilla/5.0"
+    }
   });
 
-  const page = await browser.newPage();
+  if (!response.ok) {
+    throw new Error(`ForexFactory JSON Fehler: ${response.status}`);
+  }
 
-  try {
-    await page.goto(FF_URL, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
-    });
+  const data = await response.json();
 
-    await page.waitForTimeout(6000);
+  if (!Array.isArray(data)) {
+    throw new Error("ForexFactory JSON hat unerwartetes Format");
+  }
 
-    // Akzeptiere evtl. Cookie/Dialoge nicht aktiv; wir lesen einfach Tabelle
-    const rows = await page.locator("tr.calendar__row, tr.calendar_row").evaluateAll((trs) => {
-      return trs.map((tr) => {
-        const txt = (sel) => {
-          const el = tr.querySelector(sel);
-          return el ? el.textContent.trim() : "";
-        };
-
-        const impactEl =
-          tr.querySelector(".calendar__impact span[title]") ||
-          tr.querySelector(".impact span[title]") ||
-          tr.querySelector(".calendar__impact");
-
-        const impactTitle = impactEl
-          ? (impactEl.getAttribute("title") || impactEl.textContent || "").trim()
-          : "";
-
-        return {
-          time: txt(".calendar__time, .time"),
-          currency: txt(".calendar__currency, .currency"),
-          event: txt(".calendar__event-title, .event, .calendar__event"),
-          actual: txt(".calendar__actual, .actual"),
-          forecast: txt(".calendar__forecast, .forecast"),
-          previous: txt(".calendar__previous, .previous"),
-          impact: impactTitle
-        };
-      });
-    });
-
-    const usdHigh = rows.filter((r) => {
-      const currencyOk = r.currency === "USD";
-      const impactText = (r.impact || "").toLowerCase();
-      const redOk =
-        impactText.includes("high") ||
-        impactText.includes("red") ||
-        impactText.includes("high impact");
-      return currencyOk && redOk && r.event;
-    });
-
-    if (!usdHigh.length) {
-      return {
-        ok: true,
-        found: false,
-        message: "Keine USD Red Folder News gefunden"
-      };
-    }
-
-    const enriched = usdHigh.map((r) => ({
-      ...r,
-      minutesLeft: minutesUntil(r.time)
-    }));
-
-    // Bevorzuge das nächste kommende Event, sonst das erste
-    enriched.sort((a, b) => {
-      const av = a.minutesLeft === null ? 999999 : Math.abs(a.minutesLeft);
-      const bv = b.minutesLeft === null ? 999999 : Math.abs(b.minutesLeft);
-      return av - bv;
-    });
-
-    const news = enriched[0];
+  const events = data.map((item) => {
+    const currency = pick(item, ["currency", "symbol", "ccy"], "");
+    const event = pick(item, ["title", "event", "name"], "");
+    const actual = pick(item, ["actual"], "-");
+    const forecast = pick(item, ["forecast"], "-");
+    const previous = pick(item, ["previous"], "-");
+    const impact = parseImpactValue(item);
+    const time = formatEventTime(item);
+    const minutesLeft = parseMinutesLeft(item);
 
     return {
-      ok: true,
-      found: true,
-      currency: news.currency,
-      impact: "HIGH",
-      time: news.time || "-",
-      event: news.event || "-",
-      actual: news.actual || "-",
-      forecast: news.forecast || "-",
-      previous: news.previous || "-",
-      minutesLeft: news.minutesLeft,
-      updatedAt: new Date().toISOString()
+      currency,
+      event,
+      actual,
+      forecast,
+      previous,
+      impact,
+      time,
+      minutesLeft
     };
-  } finally {
-    await browser.close();
+  });
+
+  const usdHigh = events.filter((e) => {
+    return e.currency === "USD" && e.impact === "HIGH" && e.event;
+  });
+
+  if (!usdHigh.length) {
+    return {
+      ok: true,
+      found: false,
+      message: "Keine USD Red Folder News gefunden"
+    };
   }
+
+  // nächstes relevantes Event zuerst
+  usdHigh.sort((a, b) => {
+    const av = a.minutesLeft === null ? 999999 : Math.abs(a.minutesLeft);
+    const bv = b.minutesLeft === null ? 999999 : Math.abs(b.minutesLeft);
+    return av - bv;
+  });
+
+  const news = usdHigh[0];
+
+  return {
+    ok: true,
+    found: true,
+    currency: news.currency,
+    impact: news.impact,
+    time: news.time || "-",
+    event: news.event || "-",
+    actual: news.actual || "-",
+    forecast: news.forecast || "-",
+    previous: news.previous || "-",
+    minutesLeft: news.minutesLeft,
+    updatedAt: new Date().toISOString()
+  };
 }
 
 app.get("/usd-news", async (req, res) => {
