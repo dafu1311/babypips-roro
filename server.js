@@ -6,7 +6,7 @@ const PORT = process.env.PORT || 10000;
 
 const RORO_URL = "https://www.babypips.com/tools/risk-on-risk-off-meter";
 
-// aktuelle Woche von Babypips Calendar
+// -------------------- HELPERS --------------------
 function getISOWeekString(date = new Date()) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
   const dayNum = d.getUTCDay() || 7;
@@ -16,9 +16,71 @@ function getISOWeekString(date = new Date()) {
   return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
 }
 
-const CALENDAR_URL = () =>
-  `https://www.babypips.com/economic-calendar?week=${getISOWeekString(new Date())}`;
+function getNowInNewYork() {
+  const now = new Date();
+  return new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+}
 
+function normalizeText(s) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+
+function compactEventName(name) {
+  return normalizeText(name)
+    .replace(/\s+m\/m$/i, " m/m")
+    .replace(/\s+y\/y$/i, " y/y")
+    .replace(/\s+q\/q$/i, " q/q");
+}
+
+function getTodayTokens() {
+  const now = getNowInNewYork();
+
+  const weekday = now.toLocaleDateString("en-US", { weekday: "short", timeZone: "America/New_York" });
+  const month = now.toLocaleDateString("en-US", { month: "short", timeZone: "America/New_York" });
+  const day = now.getDate();
+
+  return [
+    `${weekday} ${month} ${day}`,
+    `${month} ${day}`,
+    `${weekday}, ${month} ${day}`
+  ];
+}
+
+function parseMinutesLeft(timeStr) {
+  const m = String(timeStr).match(/(\d{1,2}):(\d{2})(am|pm)/i);
+  if (!m) return null;
+
+  let hours = parseInt(m[1], 10);
+  const minutes = parseInt(m[2], 10);
+  const ampm = m[3].toLowerCase();
+
+  if (ampm === "pm" && hours !== 12) hours += 12;
+  if (ampm === "am" && hours === 12) hours = 0;
+
+  const now = getNowInNewYork();
+  const event = new Date(now);
+  event.setHours(hours, minutes, 0, 0);
+
+  return Math.round((event.getTime() - now.getTime()) / 60000);
+}
+
+function looksLikeHighImpact(rowHtml, cells) {
+  const html = String(rowHtml || "").toLowerCase();
+  const text = cells.join(" ").toLowerCase();
+
+  return (
+    html.includes("high impact") ||
+    html.includes("impact-high") ||
+    text.includes("high impact")
+  );
+}
+
+const CALENDAR_URL = () => {
+  const nyNow = getNowInNewYork();
+  return `https://www.babypips.com/economic-calendar?week=${getISOWeekString(nyNow)}`;
+};
+
+// -------------------- ROOT --------------------
 app.get("/", (req, res) => {
   res.send("API laeuft. Nutze /roro oder /usd-news");
 });
@@ -70,63 +132,7 @@ app.get("/roro", async (req, res) => {
   }
 });
 
-// -------------------- NEWS HELPERS --------------------
-function normalizeText(s) {
-  return String(s || "").replace(/\s+/g, " ").trim();
-}
-
-function getTodayTokens() {
-  const now = new Date();
-
-  const weekday = now.toLocaleDateString("en-US", { weekday: "short" }); // Fri
-  const month = now.toLocaleDateString("en-US", { month: "short" });     // Mar
-  const day = now.getDate();                                             // 13
-
-  return [
-    `${weekday} ${month} ${day}`,
-    `${month} ${day}`,
-    `${weekday}, ${month} ${day}`
-  ];
-}
-
-function parseMinutesLeft(timeStr) {
-  const m = String(timeStr).match(/(\d{1,2}):(\d{2})(am|pm)/i);
-  if (!m) return null;
-
-  let hours = parseInt(m[1], 10);
-  const minutes = parseInt(m[2], 10);
-  const ampm = m[3].toLowerCase();
-
-  if (ampm === "pm" && hours !== 12) hours += 12;
-  if (ampm === "am" && hours === 12) hours = 0;
-
-  const now = new Date();
-  const event = new Date();
-  event.setHours(hours, minutes, 0, 0);
-
-  return Math.round((event.getTime() - now.getTime()) / 60000);
-}
-
-function looksLikeHighImpact(rowHtml, cells) {
-  const html = rowHtml.toLowerCase();
-  const text = cells.join(" ").toLowerCase();
-
-  return (
-    html.includes("high impact") ||
-    html.includes("impact-high") ||
-    html.includes("red") ||
-    text.includes("high impact")
-  );
-}
-
-function compactEventName(name) {
-  return normalizeText(name)
-    .replace(/\s+m\/m$/i, " m/m")
-    .replace(/\s+y\/y$/i, " y/y")
-    .replace(/\s+q\/q$/i, " q/q");
-}
-
-// -------------------- USD RED NEWS LIST --------------------
+// -------------------- USD NEWS LIST --------------------
 async function getUsdNewsList() {
   const browser = await chromium.launch({
     headless: true,
@@ -146,9 +152,9 @@ async function getUsdNewsList() {
     const rows = await page.locator("tr").evaluateAll((trs) => {
       return trs.map((tr) => ({
         html: tr.innerHTML,
-        cells: Array.from(tr.querySelectorAll("td, th")).map((cell) =>
-          (cell.textContent || "").replace(/\s+/g, " ").trim()
-        ).filter(Boolean)
+        cells: Array.from(tr.querySelectorAll("td, th"))
+          .map((cell) => (cell.textContent || "").replace(/\s+/g, " ").trim())
+          .filter(Boolean)
       }));
     });
 
@@ -157,40 +163,36 @@ async function getUsdNewsList() {
     const events = [];
 
     for (const row of rows) {
-      const cells = row.cells.map(c => c.trim()).filter(Boolean);
+      const cells = row.cells.map((c) => c.trim()).filter(Boolean);
       if (!cells.length) continue;
 
       const first = cells[0] || "";
 
-      // Datum merken
       if (
-        todayTokens.some(t => first.includes(t)) ||
+        todayTokens.some((t) => first.includes(t)) ||
         /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b/.test(first)
       ) {
         currentDate = first;
       }
 
       const isToday =
-        todayTokens.some(t => currentDate.includes(t)) ||
-        todayTokens.some(t => cells.some(c => c.includes(t)));
+        todayTokens.some((t) => currentDate.includes(t)) ||
+        todayTokens.some((t) => cells.some((c) => c.includes(t)));
 
       if (!isToday) continue;
 
-      const currencyIdx = cells.findIndex(c => c === "USD");
+      const currencyIdx = cells.findIndex((c) => c === "USD");
       if (currencyIdx === -1) continue;
 
       if (!looksLikeHighImpact(row.html, cells)) continue;
 
-      const time = cells.find(c => /\d{1,2}:\d{2}(am|pm)/i.test(c)) || "-";
+      const time = cells.find((c) => /\d{1,2}:\d{2}(am|pm)/i.test(c)) || "-";
 
-      // Versuche Event/Actual/Forecast/Previous aus den Zellen zu ziehen
-      // Typischer Aufbau: [date? time currency impact event actual forecast previous ...]
       let event = "-";
       let actual = "-";
       let forecast = "-";
       let previous = "-";
 
-      // Event = erste längere Textzelle nach USD, die kein Wert ist
       for (let i = currencyIdx + 1; i < cells.length; i++) {
         const c = cells[i];
         if (!c) continue;
@@ -206,7 +208,6 @@ async function getUsdNewsList() {
         }
       }
 
-      // Werte eher am Ende
       const tail = cells.slice(-4);
       if (tail.length >= 3) {
         actual = tail[0] || "-";
@@ -214,7 +215,6 @@ async function getUsdNewsList() {
         previous = tail[2] || "-";
       }
 
-      // Falls "View Details" reingerutscht ist -> ignorieren
       if (/view details/i.test(previous)) previous = "-";
       if (/view details/i.test(forecast)) forecast = "-";
       if (/view details/i.test(actual)) actual = "-";
@@ -231,7 +231,6 @@ async function getUsdNewsList() {
       });
     }
 
-    // Doppelte Zeilen entfernen
     const deduped = [];
     const seen = new Set();
 
@@ -243,7 +242,6 @@ async function getUsdNewsList() {
       }
     }
 
-    // Nach Uhrzeit sortieren
     deduped.sort((a, b) => {
       const av = a.minutesLeft === null ? 999999 : a.minutesLeft;
       const bv = b.minutesLeft === null ? 999999 : b.minutesLeft;
@@ -255,7 +253,8 @@ async function getUsdNewsList() {
         ok: true,
         found: false,
         message: "Keine USD Red Folder News fuer heute gefunden",
-        events: []
+        events: [],
+        updatedAt: new Date().toISOString()
       };
     }
 
