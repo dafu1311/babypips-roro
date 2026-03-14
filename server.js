@@ -6,7 +6,19 @@ const PORT = process.env.PORT || 10000;
 
 const RORO_URL = "https://www.babypips.com/tools/risk-on-risk-off-meter";
 
-// -------------------- HELPERS --------------------
+// -------------------- DATE HELPERS --------------------
+
+function getNowNY() {
+  const now = new Date();
+  return new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
 function getISOWeekString(date = new Date()) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
   const dayNum = d.getUTCDay() || 7;
@@ -16,77 +28,37 @@ function getISOWeekString(date = new Date()) {
   return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
 }
 
-function getNowInNewYork() {
-  const now = new Date();
-  return new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+function isWeekendNY() {
+  const now = getNowNY();
+  const d = now.getDay();
+  return d === 0 || d === 6;
 }
 
-function normalizeText(s) {
+function normalize(s) {
   return String(s || "").replace(/\s+/g, " ").trim();
 }
 
-function compactEventName(name) {
-  return normalizeText(name)
-    .replace(/\s+m\/m$/i, " m/m")
-    .replace(/\s+y\/y$/i, " y/y")
-    .replace(/\s+q\/q$/i, " q/q");
-}
-
-function getTodayTokens() {
-  const now = getNowInNewYork();
-
-  const weekday = now.toLocaleDateString("en-US", { weekday: "short", timeZone: "America/New_York" });
-  const month = now.toLocaleDateString("en-US", { month: "short", timeZone: "America/New_York" });
-  const day = now.getDate();
-
-  return [
-    `${weekday} ${month} ${day}`,
-    `${month} ${day}`,
-    `${weekday}, ${month} ${day}`
-  ];
-}
-
-function parseMinutesLeft(timeStr) {
-  const m = String(timeStr).match(/(\d{1,2}):(\d{2})(am|pm)/i);
-  if (!m) return null;
-
-  let hours = parseInt(m[1], 10);
-  const minutes = parseInt(m[2], 10);
-  const ampm = m[3].toLowerCase();
-
-  if (ampm === "pm" && hours !== 12) hours += 12;
-  if (ampm === "am" && hours === 12) hours = 0;
-
-  const now = getNowInNewYork();
-  const event = new Date(now);
-  event.setHours(hours, minutes, 0, 0);
-
-  return Math.round((event.getTime() - now.getTime()) / 60000);
-}
-
-function looksLikeHighImpact(rowHtml, cells) {
-  const html = String(rowHtml || "").toLowerCase();
+function looksLikeHighImpact(html, cells) {
   const text = cells.join(" ").toLowerCase();
+  const h = html.toLowerCase();
 
   return (
-    html.includes("high impact") ||
-    html.includes("impact-high") ||
-    text.includes("high impact")
+    h.includes("high impact") ||
+    h.includes("impact-high") ||
+    text.includes("high")
   );
 }
 
-const CALENDAR_URL = () => {
-  const nyNow = getNowInNewYork();
-  return `https://www.babypips.com/economic-calendar?week=${getISOWeekString(nyNow)}`;
-};
-
 // -------------------- ROOT --------------------
+
 app.get("/", (req, res) => {
-  res.send("API laeuft. Nutze /roro oder /usd-news");
+  res.send("Babypips API läuft. Nutze /roro oder /usd-news");
 });
 
-// -------------------- RORO --------------------
+// -------------------- RORO (DEIN FUNKTIONIERENDER CODE) --------------------
+
 async function getRiskData() {
+
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"]
@@ -95,6 +67,7 @@ async function getRiskData() {
   const page = await browser.newPage();
 
   try {
+
     await page.goto(RORO_URL, {
       waitUntil: "domcontentloaded",
       timeout: 60000
@@ -106,34 +79,46 @@ async function getRiskData() {
     const match = body.match(/\b(\d{1,3})\s+(Risk-Off|Risk-On|Neutral)/);
 
     if (!match) {
-      throw new Error("RORO Score nicht gefunden");
+      throw new Error("Score nicht gefunden");
     }
+
+    const value = parseInt(match[1], 10);
+    const regime = match[2];
 
     return {
       ok: true,
-      value: parseInt(match[1], 10),
-      regime: match[2],
+      value,
+      regime,
       updatedAt: new Date().toISOString()
     };
+
   } finally {
     await browser.close();
   }
 }
 
 app.get("/roro", async (req, res) => {
+
   try {
+
     const data = await getRiskData();
     res.json(data);
+
   } catch (err) {
+
     res.status(500).json({
       ok: false,
       error: String(err)
     });
+
   }
+
 });
 
-// -------------------- USD NEWS LIST --------------------
-async function getUsdNewsList() {
+// -------------------- NEWS SCRAPER --------------------
+
+async function getUsdNews(mode = "auto") {
+
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"]
@@ -142,146 +127,137 @@ async function getUsdNewsList() {
   const page = await browser.newPage();
 
   try {
-    await page.goto(CALENDAR_URL(), {
+
+    const now = getNowNY();
+
+    if (mode === "auto") {
+      mode = isWeekendNY() ? "nextweek" : "today";
+    }
+
+    const targetDate = mode === "nextweek"
+      ? addDays(now, 7)
+      : now;
+
+    const calendarUrl =
+      `https://www.babypips.com/economic-calendar?week=${getISOWeekString(targetDate)}`;
+
+    await page.goto(calendarUrl, {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
-    await page.waitForTimeout(7000);
+    await page.waitForTimeout(6000);
 
     const rows = await page.locator("tr").evaluateAll((trs) => {
-      return trs.map((tr) => ({
+
+      return trs.map(tr => ({
         html: tr.innerHTML,
-        cells: Array.from(tr.querySelectorAll("td, th"))
-          .map((cell) => (cell.textContent || "").replace(/\s+/g, " ").trim())
+        cells: Array.from(tr.querySelectorAll("td,th"))
+          .map(c => (c.textContent || "").replace(/\s+/g, " ").trim())
           .filter(Boolean)
       }));
+
     });
 
-    const todayTokens = getTodayTokens();
-    let currentDate = "";
     const events = [];
 
     for (const row of rows) {
-      const cells = row.cells.map((c) => c.trim()).filter(Boolean);
+
+      const cells = row.cells;
+
       if (!cells.length) continue;
 
-      const first = cells[0] || "";
-
-      if (
-        todayTokens.some((t) => first.includes(t)) ||
-        /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b/.test(first)
-      ) {
-        currentDate = first;
-      }
-
-      const isToday =
-        todayTokens.some((t) => currentDate.includes(t)) ||
-        todayTokens.some((t) => cells.some((c) => c.includes(t)));
-
-      if (!isToday) continue;
-
-      const currencyIdx = cells.findIndex((c) => c === "USD");
+      const currencyIdx = cells.findIndex(c => c === "USD");
       if (currencyIdx === -1) continue;
 
       if (!looksLikeHighImpact(row.html, cells)) continue;
 
-      const time = cells.find((c) => /\d{1,2}:\d{2}(am|pm)/i.test(c)) || "-";
+      const time = cells.find(c => /\d{1,2}:\d{2}(am|pm)/i.test(c)) || "-";
 
       let event = "-";
-      let actual = "-";
-      let forecast = "-";
-      let previous = "-";
 
       for (let i = currencyIdx + 1; i < cells.length; i++) {
-        const c = cells[i];
-        if (!c) continue;
 
-        const isNumberLike =
-          /^[\d.,%MKBT+-]+$/.test(c) ||
+        const c = cells[i];
+
+        const isValue =
+          /^[\d.,%MKBTkmbt+-]+$/.test(c) ||
           c === "-" ||
           c.toLowerCase() === "high";
 
-        if (!isNumberLike && !/\d{1,2}:\d{2}(am|pm)/i.test(c) && c !== "USD") {
+        if (!isValue) {
           event = c;
           break;
         }
+
       }
 
       const tail = cells.slice(-4);
-      if (tail.length >= 3) {
-        actual = tail[0] || "-";
-        forecast = tail[1] || "-";
-        previous = tail[2] || "-";
-      }
 
-      if (/view details/i.test(previous)) previous = "-";
-      if (/view details/i.test(forecast)) forecast = "-";
-      if (/view details/i.test(actual)) actual = "-";
+      const actual = normalize(tail[0]);
+      const forecast = normalize(tail[1]);
+      const previous = normalize(tail[2]);
 
       events.push({
         currency: "USD",
         impact: "HIGH",
         time,
-        event: compactEventName(event),
-        actual: normalizeText(actual),
-        forecast: normalizeText(forecast),
-        previous: normalizeText(previous),
-        minutesLeft: parseMinutesLeft(time)
+        event,
+        actual,
+        forecast,
+        previous
       });
+
     }
 
-    const deduped = [];
-    const seen = new Set();
+    if (!events.length) {
 
-    for (const e of events) {
-      const key = `${e.time}|${e.event}|${e.actual}|${e.forecast}|${e.previous}`;
-      if (!seen.has(key) && e.event !== "-") {
-        seen.add(key);
-        deduped.push(e);
-      }
-    }
-
-    deduped.sort((a, b) => {
-      const av = a.minutesLeft === null ? 999999 : a.minutesLeft;
-      const bv = b.minutesLeft === null ? 999999 : b.minutesLeft;
-      return av - bv;
-    });
-
-    if (!deduped.length) {
       return {
         ok: true,
         found: false,
-        message: "Keine USD Red Folder News fuer heute gefunden",
-        events: [],
-        updatedAt: new Date().toISOString()
+        mode,
+        events: []
       };
+
     }
 
     return {
       ok: true,
       found: true,
-      count: deduped.length,
-      events: deduped,
-      updatedAt: new Date().toISOString()
+      mode,
+      count: events.length,
+      events
     };
+
   } finally {
+
     await browser.close();
+
   }
+
 }
 
 app.get("/usd-news", async (req, res) => {
+
   try {
-    const data = await getUsdNewsList();
+
+    const mode = req.query.mode || "auto";
+
+    const data = await getUsdNews(mode);
+
     res.json(data);
+
   } catch (err) {
+
     res.status(500).json({
       ok: false,
       error: String(err)
     });
+
   }
+
 });
 
 app.listen(PORT, () => {
-  console.log(`Server laeuft auf Port ${PORT}`);
+  console.log(`Server läuft auf Port ${PORT}`);
 });
