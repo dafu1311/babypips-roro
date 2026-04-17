@@ -46,12 +46,16 @@ async function getRiskData() {
   }
 }
 
-app.get('/roro', (req, res) => {
-  res.json({
-    ok: true,
-    value: 70,
-    regime: "Risk-On"
-  });
+app.get("/roro", async (req, res) => {
+  try {
+    const data = await getRiskData();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: String(err)
+    });
+  }
 });
 
 app.listen(PORT, () => {
