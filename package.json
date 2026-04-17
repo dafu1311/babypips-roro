@@ -1,7 +1,7 @@
 {
   "name": "babypips-roro",
   "version": "1.0.0",
-  "description": "Risk sentiment and USD news API",
+  "description": "Babypips Risk On Risk Off API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
