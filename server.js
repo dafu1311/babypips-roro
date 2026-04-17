@@ -26,6 +26,9 @@ async function getRiskData() {
     await page.waitForTimeout(8000);
 
     const body = await page.locator("body").innerText();
+	console.log("BODY START:");
+	console.log(body.slice(0, 3000));
+	console.log("BODY ENDE");
     const match = body.match(/\b(\d{1,3})\s+(Risk-Off|Risk-On|Neutral)/);
 
     if (!match) {
