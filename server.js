@@ -15,7 +15,13 @@ async function getRiskData() {
     args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
 
-  const page = await browser.newPage();
+  const page = await browser.newPage({
+  userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+});
+
+await page.setExtraHTTPHeaders({
+  "accept-language": "en-US,en;q=0.9"
+});
 
   try {
     await page.goto(URL, {
